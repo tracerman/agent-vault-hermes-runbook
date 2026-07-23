@@ -377,3 +377,119 @@ store the agent cannot reach. That is a real improvement, not a perfect one.
 **Weakest link in a same-host deployment:** anything with access to the Docker
 socket can reach both containers. Separate hosts, plus an egress firewall
 restricting the agent to the broker, is what makes it a hard boundary.
+
+
+---
+
+## Adapting this to packaged Hermes distributions
+
+The above assumes you run Hermes yourself: your own compose file, your own
+container, your own update path. Packaged distributions like
+[Fox in the Box](https://foxinthebox.io) bundle Hermes into a single managed
+container with a desktop app, one-click install, and auto-updates.
+
+The brokering concept transfers cleanly. The wiring does not. These are the
+differences worth checking before you start. **None of this has been tested
+against a packaged build** — treat it as a list of things to verify, not
+instructions.
+
+### Auto-updates may silently undo the wiring
+
+This is the one that will bite hardest.
+
+Brokering depends on `HTTPS_PROXY`, `NO_PROXY`, the CA bundle variables, and a
+CA file mounted into the container. If a desktop app or updater recreates the
+container from its own template, all of that disappears. The agent comes back
+holding placeholder strings with no proxy to resolve them, and every brokered
+call fails.
+
+There is no error at install time and no warning. It just stops working after
+an update.
+
+Before wiring anything, find out whether the distribution supports **persistent
+custom environment variables and volume mounts** that survive a container
+recreate. If it does not, brokering will need re-applying after every update,
+which is a maintenance burden worth knowing about up front.
+
+A cheap canary, run after any update:
+
+```bash
+docker exec <container> printenv HTTPS_PROXY
+docker exec <container> sh -c "grep -cE '=__[a-z_]+__$' /path/to/.env"
+```
+
+If the first is empty while the second is non-zero, the agent is holding
+placeholders with no broker. That is the broken state.
+
+### Single-container topologies
+
+Packaged distributions often run everything in one container and deliberately
+give it no access to the host. Good isolation, but it means the broker cannot
+live on the host loopback and be reached the usual way.
+
+Options, roughly in order of preference:
+
+1. **Broker on a second machine**, reached over a private network. Best
+   isolation, and what Infisical recommends anyway.
+2. **Broker as a sibling container** on a shared Docker network, with the agent
+   joined to that network. Requires the distribution to allow custom networks.
+3. **Broker on the host**, reached via `host.docker.internal`. Works on Docker
+   Desktop, but only if the distribution's isolation does not block it.
+
+Hosted or cloud tiers, where you do not control the container, generally cannot
+do this at all. Brokering needs to sit in the network path.
+
+### Tailscale solves the separate-host problem
+
+Distributions that ship Tailscale for remote access have a better answer
+available than the one used above.
+
+Running the broker and the agent on the same Docker host is the weakest part of
+this setup: anything with Docker socket access reaches both. Infisical's own
+guidance is to separate them.
+
+A broker on a second machine, reachable over your tailnet, gives you that
+separation without exposing the proxy port to the internet. Point
+`HTTPS_PROXY` at the broker's tailnet address instead of a container name.
+
+Watch the latency. Every brokered call is a round trip, and agents make a lot
+of calls. Keep the two machines geographically close.
+
+### Local model providers do not need brokering
+
+If you run models locally (Ollama on the host or in-container), there is no
+credential to substitute. Routing that traffic through the broker adds a hop
+and a TLS interception for no benefit.
+
+Add local endpoints to `NO_PROXY`:
+
+```
+NO_PROXY=localhost,127.0.0.1,::1,agent-vault,host.docker.internal,ollama
+```
+
+Brokering is for credentials leaving your network. Local inference is neither.
+
+### Other chat platforms
+
+Telegram needs the `path` surface because its Bot API puts the token in the
+URL. That is unusual. Most platforms use headers, but the formats differ:
+
+| Platform | Where the credential goes | Surface |
+|---|---|---|
+| Telegram | `/bot<TOKEN>/method` in the URL | **path** |
+| Discord | `Authorization: Bot <TOKEN>` | header |
+| Slack | `Authorization: Bearer xoxb-...` | header |
+| WhatsApp (Meta) | `Authorization: Bearer <TOKEN>` | header |
+
+The principle generalizes: find where the credential actually travels, then
+pick the surface to match. The specific answer does not transfer between
+platforms.
+
+### Memory providers differ
+
+This build used Honcho (`api.honcho.dev`). Distributions using mem0 or another
+provider will have a different host, and a self-hosted memory backend needs no
+brokering at all since the credential never leaves your network.
+
+The general check applies: grep the running code for the hosts it actually
+calls rather than trusting a config file or a table like the one above.
