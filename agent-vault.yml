@@ -1,0 +1,43 @@
+# Agent Vault broker for a containerized agent.
+#
+#   $env:AGENT_VAULT_MASTER_PASSWORD = "<password>"
+#   docker compose -f agent-vault.yml up -d
+#
+# Then register the owner account at http://localhost:14321/register
+#
+# STORE THE MASTER PASSWORD SOMEWHERE SAFE FIRST. It wraps the data encryption
+# key and lives only in memory once the server unlocks. Lose it and every
+# credential in the vault is unrecoverable.
+#
+# Keep this file in its OWN directory, separate from your agent's compose file.
+# If they share a directory, `docker compose up -d --remove-orphans` run against
+# the agent project will delete this broker.
+
+services:
+  agent-vault:
+    # Pin by digest in production. Agent Vault is preview software with an
+    # explicitly unstable API. Find the current digest with:
+    #   docker buildx imagetools inspect infisical/agent-vault:latest
+    image: infisical/agent-vault:latest
+    container_name: agent-vault
+    restart: unless-stopped
+    ports:
+      # Management UI and API. Loopback only: you administer from this box.
+      - "127.0.0.1:14321:14321"
+      # MITM proxy. This is the ingress your agent routes through.
+      # Keep it private to the agent's network. Never expose it publicly.
+      - "127.0.0.1:14322:14322"
+    environment:
+      - AGENT_VAULT_MASTER_PASSWORD=${AGENT_VAULT_MASTER_PASSWORD}
+      - AGENT_VAULT_ADDR=http://localhost:14321
+    volumes:
+      - agent-vault-data:/data
+    networks:
+      - broker-net
+
+volumes:
+  agent-vault-data:
+
+networks:
+  broker-net:
+    name: broker-net
