@@ -1,0 +1,56 @@
+# Merge this into your AGENT's compose service. Not a standalone file.
+#
+# Assumes:
+#   - the broker is running (see agent-vault.yml)
+#   - you extracted the CA:
+#       docker cp agent-vault:/data/.agent-vault/ca/ca.crt.pem ./agent-vault-ca/mitm-ca.pem
+#   - you minted an agent token in the UI under Agents, and exported it:
+#       $env:AGENT_VAULT_TOKEN = "av_agt_..."
+#
+# DO NOT set `entrypoint: ["agent-vault", "run", "--", ...]` as the Agent Vault
+# docs suggest. On images that use s6-overlay (Hermes among them) that replaces
+# /init and kills the supervisor along with every supervised service. Setting
+# the environment directly achieves the same thing and leaves the image stock.
+
+services:
+  your-agent:
+    volumes:
+      # The broker terminates TLS to substitute credentials. Without this CA
+      # every HTTPS call fails certificate verification.
+      - "./agent-vault-ca/mitm-ca.pem:/opt/agent-vault-ca.pem:ro"
+
+    environment:
+      # Which broker, who is calling, which credential set.
+      - AGENT_VAULT_ADDR=http://agent-vault:14321
+      - AGENT_VAULT_VAULT=prod
+      - AGENT_VAULT_TOKEN=${AGENT_VAULT_TOKEN}
+
+      # Route outbound traffic through the broker. The agent token doubles as
+      # the proxy's basic-auth username.
+      #
+      # WARNING: if AGENT_VAULT_TOKEN is unset, compose interpolates it to an
+      # EMPTY STRING, producing http://@agent-vault:14322. Every brokered call
+      # then fails and nothing warns you. Guard your update scripts.
+      - HTTPS_PROXY=http://${AGENT_VAULT_TOKEN}@agent-vault:14322
+      - HTTP_PROXY=http://${AGENT_VAULT_TOKEN}@agent-vault:14322
+
+      # Never proxy loopback or the broker's own API, or you create a loop.
+      # Add any LOCAL model endpoints here too: local inference has no
+      # credential to broker and gains nothing from the extra hop.
+      - NO_PROXY=localhost,127.0.0.1,::1,agent-vault
+      - no_proxy=localhost,127.0.0.1,::1,agent-vault
+
+      # Trust the broker's CA across every runtime the agent might shell into.
+      - REQUESTS_CA_BUNDLE=/opt/agent-vault-ca.pem
+      - SSL_CERT_FILE=/opt/agent-vault-ca.pem
+      - NODE_EXTRA_CA_CERTS=/opt/agent-vault-ca.pem
+      - CURL_CA_BUNDLE=/opt/agent-vault-ca.pem
+      - GIT_SSL_CAINFO=/opt/agent-vault-ca.pem
+      - NODE_USE_ENV_PROXY=1
+
+    networks:
+      - broker-net
+
+networks:
+  broker-net:
+    external: true
